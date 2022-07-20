@@ -1,9 +1,12 @@
 package io.provenance.client
 
+import com.google.common.io.BaseEncoding
 import com.google.gson.Gson
+import com.google.protobuf.Timestamp
 import cosmos.auth.v1beta1.QueryOuterClass
 import cosmos.bank.v1beta1.Tx
 import cosmos.base.v1beta1.CoinOuterClass
+import cosmos.tx.v1beta1.ServiceOuterClass
 import cosmos.tx.v1beta1.TxOuterClass
 import io.provenance.client.grpc.BaseReqSigner
 import io.provenance.client.grpc.GasEstimate
@@ -13,9 +16,16 @@ import io.provenance.client.protobuf.extensions.toTxBody
 import io.provenance.client.wallet.NetworkType
 import io.provenance.client.wallet.WalletSigner
 import io.provenance.client.wallet.fromMnemonic
+import io.provenance.reward.v1.QualifyingAction
+import io.provenance.reward.v1.MsgCreateRewardProgramRequest
+import io.provenance.reward.v1.MsgCreateRewardProgramResponse
+import io.provenance.reward.v1.RewardProgramByIDRequest
+import io.provenance.reward.v1.RewardProgramsRequest
 import org.junit.Before
 import org.junit.Ignore
+import java.io.ByteArrayInputStream
 import java.io.File
+import java.io.InputStreamReader
 import java.net.URI
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -23,7 +33,7 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 // Tests only work with `make localnet-start` being run on provenance github projects.
-@Ignore
+// @Ignore
 class PbClientTest {
 
     val pbClient = PbClient(
@@ -116,6 +126,50 @@ class PbClientTest {
     }
 
     @Test
+    fun testAddRewardProgram() {
+        val wallet = mapOfNodeSigners["node0"]!!
+
+        val txn: TxOuterClass.TxBody = MsgCreateRewardProgramRequest
+            .newBuilder()
+            .setTitle("title")
+            .setDescription("description")
+            .setDistributeFromAddress(wallet.address())
+            .setTotalRewardPool(CoinOuterClass.Coin.newBuilder().setAmount("1000000000000").setDenom("nhash").build())
+            .setMaxRewardPerClaimAddress(CoinOuterClass.Coin.newBuilder().setAmount("1000000").setDenom("nhash").build())
+            .setClaimPeriods(10)
+            .setProgramStartTime(Timestamp.newBuilder().setSeconds(Timestamp.getDefaultInstance().seconds + 60))
+            .setMaxRolloverClaimPeriods(0)
+            .setExpireDays(10)
+            .addQualifyingActions(QualifyingAction.getDefaultInstance())
+            .setClaimPeriodDays(1)
+            .build()
+            .toAny()
+            .toTxBody()
+        val res = pbClient.estimateAndBroadcastTx(txn, listOf(BaseReqSigner(wallet)), gasAdjustment = 1.5f, mode = ServiceOuterClass.BroadcastMode.BROADCAST_MODE_BLOCK
+        )
+        assertTrue(
+            res.txResponse.code == 0,
+            "Did not succeed."
+        )
+
+        val rewardProgramCreatedEvent = res.txResponse.eventsList.find { it.type == "reward_program_created" }
+        val programId = rewardProgramCreatedEvent?.attributesList?.find{
+            it.key.toString("UTF-8") == "reward_program_id"
+        }?.value?.toString("UTF-8")?.toLong()
+        assertNotNull (
+            programId,
+            "could not find reward program id in events"
+        )
+
+        val qRes = pbClient.rewardCleint.rewardProgramByID(RewardProgramByIDRequest.newBuilder().setId(programId!!).build())
+        assertEquals (
+            qRes.rewardProgram.id,
+            programId!!,
+            "did not find reward program"
+        )
+    }
+
+    @Test
     fun testClientMultipleTxn() {
         // sample mnemonic
         val walletSignerToWallet = fromMnemonic(NetworkType.TESTNET, mnemonic)
@@ -186,7 +240,7 @@ class PbClientTest {
     fun getAllVotingKeys(): MutableMap<String, WalletSigner> {
         val mapOfSigners = mutableMapOf<String, WalletSigner>()
         for (i in 0 until 4) {
-            val jsonString: String = File("../../provenance/build/node$i/key_seed.json").readText(Charsets.UTF_8)
+            val jsonString: String = File("/Users/carltonhanna/code/provenance/build/node$i/key_seed.json").readText(Charsets.UTF_8)
             val map = Gson().fromJson(jsonString, mutableMapOf<String, String>().javaClass)
             val walletSigner = fromMnemonic(NetworkType.COSMOS_TESTNET, map["secret"]!!)
             println(walletSigner.address())

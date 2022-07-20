@@ -78,6 +78,7 @@ open class PbClient(
     val msgFeeClient = io.provenance.msgfees.v1.QueryGrpc.newBlockingStub(channel)
     val nameClient = io.provenance.name.v1.QueryGrpc.newBlockingStub(channel)
     val paramsClient = cosmos.params.v1beta1.QueryGrpc.newBlockingStub(channel)
+    val rewardCleint = io.provenance.reward.v1.QueryGrpc.newBlockingStub(channel)
     val slashingClient = cosmos.slashing.v1beta1.QueryGrpc.newBlockingStub(channel)
     val stakingClient = cosmos.staking.v1beta1.QueryGrpc.newBlockingStub(channel)
     val transferClient = ibc.applications.transfer.v1.QueryGrpc.newBlockingStub(channel)
