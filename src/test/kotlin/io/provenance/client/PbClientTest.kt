@@ -1,6 +1,5 @@
 package io.provenance.client
 
-import com.google.common.io.BaseEncoding
 import com.google.gson.Gson
 import com.google.protobuf.Timestamp
 import cosmos.auth.v1beta1.QueryOuterClass
@@ -16,16 +15,9 @@ import io.provenance.client.protobuf.extensions.toTxBody
 import io.provenance.client.wallet.NetworkType
 import io.provenance.client.wallet.WalletSigner
 import io.provenance.client.wallet.fromMnemonic
-import io.provenance.reward.v1.QualifyingAction
-import io.provenance.reward.v1.MsgCreateRewardProgramRequest
-import io.provenance.reward.v1.MsgCreateRewardProgramResponse
-import io.provenance.reward.v1.RewardProgramByIDRequest
-import io.provenance.reward.v1.RewardProgramsRequest
+import io.provenance.reward.v1.*
 import org.junit.Before
-import org.junit.Ignore
-import java.io.ByteArrayInputStream
 import java.io.File
-import java.io.InputStreamReader
 import java.net.URI
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -54,9 +46,9 @@ class PbClientTest {
             if (listOfMsgFees.filter { it.msgTypeUrl == "/provenance.marker.v1.MsgAddMarkerRequest" }.isEmpty()) {
                 createGovProposalAndVote(walletSigners = mapOfNodeSigners, "/provenance.marker.v1.MsgAddMarkerRequest")
             }
-            if (listOfMsgFees.filter { it.msgTypeUrl == "/cosmos.bank.v1beta1.MsgSend" }.isEmpty()) {
-                createGovProposalAndVote(walletSigners = mapOfNodeSigners, "/cosmos.bank.v1beta1.MsgSend")
-            }
+//            if (listOfMsgFees.filter { it.msgTypeUrl == "/cosmos.bank.v1beta1.MsgSend" }.isEmpty()) {
+//                createGovProposalAndVote(walletSigners = mapOfNodeSigners, "/cosmos.bank.v1beta1.MsgSend")
+//            }
         }
     }
 
@@ -128,7 +120,14 @@ class PbClientTest {
     @Test
     fun testAddRewardProgram() {
         val wallet = mapOfNodeSigners["node0"]!!
+        val walletSignerToWallet = fromMnemonic(NetworkType.TESTNET, mnemonic)
 
+        val transferQA = ActionTransfer
+            .newBuilder()
+            .setMaximumActions(10)
+            .setMinimumActions(1)
+            .setMinimumDelegationAmount(CoinOuterClass.Coin.newBuilder().setAmount("0").setDenom("nhash").build())
+            .build()
         val txn: TxOuterClass.TxBody = MsgCreateRewardProgramRequest
             .newBuilder()
             .setTitle("title")
@@ -140,7 +139,7 @@ class PbClientTest {
             .setProgramStartTime(Timestamp.newBuilder().setSeconds(Timestamp.getDefaultInstance().seconds + 60))
             .setMaxRolloverClaimPeriods(0)
             .setExpireDays(10)
-            .addQualifyingActions(QualifyingAction.getDefaultInstance())
+            .addQualifyingActions(QualifyingAction.newBuilder().setTransfer(transferQA).build())
             .setClaimPeriodDays(1)
             .build()
             .toAny()
@@ -164,9 +163,43 @@ class PbClientTest {
         val qRes = pbClient.rewardCleint.rewardProgramByID(RewardProgramByIDRequest.newBuilder().setId(programId!!).build())
         assertEquals (
             qRes.rewardProgram.id,
-            programId!!,
+            programId,
             "did not find reward program"
         )
+
+        val send1 = Tx.MsgSend.newBuilder()
+            .setFromAddress(wallet.address())
+            .setToAddress(walletSignerToWallet.address())
+            .addAmount(CoinOuterClass.Coin.newBuilder().setDenom("nhash").setAmount("1"))
+            .build()
+            .toAny()
+
+        val send2 = Tx.MsgSend.newBuilder()
+            .setFromAddress(wallet.address())
+            .setToAddress(walletSignerToWallet.address())
+            .addAmount(CoinOuterClass.Coin.newBuilder().setDenom("nhash").setAmount("1"))
+            .build()
+            .toAny()
+        val sendRes = pbClient.estimateAndBroadcastTx(listOf(send1, send2).toTxBody(), listOf(BaseReqSigner(wallet)), gasAdjustment = 2f, mode = ServiceOuterClass.BroadcastMode.BROADCAST_MODE_BLOCK)
+        assertTrue(
+            sendRes.txResponse.code == 0,
+            "Did not succeed."
+        )
+
+        val claimPeriodRewardDistributionByIDResponse = pbClient.rewardCleint.claimPeriodRewardDistributionsByID(ClaimPeriodRewardDistributionByIDRequest
+            .newBuilder()
+            .setRewardId(programId)
+            .setClaimPeriodId(1L)
+            .build())
+
+        println(claimPeriodRewardDistributionByIDResponse)
+        assertEquals(
+            claimPeriodRewardDistributionByIDResponse.claimPeriodRewardDistribution.totalShares,
+            2,
+            "Account should have 2 shares for reward program."
+        )
+        val claimPeriodRewardDistributions = pbClient.rewardCleint.claimPeriodRewardDistributions(ClaimPeriodRewardDistributionRequest.getDefaultInstance())
+        println(claimPeriodRewardDistributions)
     }
 
     @Test
