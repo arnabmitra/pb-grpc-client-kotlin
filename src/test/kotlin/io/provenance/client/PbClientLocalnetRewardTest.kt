@@ -19,6 +19,7 @@ import io.provenance.reward.v1.*
 import org.junit.Before
 import java.io.File
 import java.net.URI
+import java.time.Instant
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -26,7 +27,7 @@ import kotlin.test.assertTrue
 
 // Tests only work with `make localnet-start` being run on provenance github projects.
 // @Ignore
-class PbClientTest {
+class PbClientLocalnetRewardTest {
 
     val pbClient = PbClient(
         chainId = "chain-local",
@@ -40,7 +41,7 @@ class PbClientTest {
 
     @Before
     fun before() {
-        mapOfNodeSigners = getAllVotingKeys()
+        mapOfNodeSigners = getAllNodeKeys()
     }
 
     @Test
@@ -57,9 +58,13 @@ class PbClientTest {
     }
 
     @Test
-    fun testAddRewardProgram() {
+    fun testAddRewardProgramWithTransferDelegation() {
         val wallet = mapOfNodeSigners["node0"]!!
         val walletSignerToWallet = fromMnemonic(NetworkType.TESTNET, mnemonic)
+        val futureSeconds = 20
+        val instant = Instant.now()
+        val now = Timestamp.newBuilder().setSeconds(instant.getEpochSecond() + futureSeconds)
+            .setNanos(instant.getNano()).build();
 
         val transferQA = ActionTransfer
             .newBuilder()
@@ -75,7 +80,7 @@ class PbClientTest {
             .setTotalRewardPool(CoinOuterClass.Coin.newBuilder().setAmount("1000000000000").setDenom("nhash").build())
             .setMaxRewardPerClaimAddress(CoinOuterClass.Coin.newBuilder().setAmount("1000000").setDenom("nhash").build())
             .setClaimPeriods(10)
-            .setProgramStartTime(Timestamp.newBuilder().setSeconds(Timestamp.getDefaultInstance().seconds + 30))
+            .setProgramStartTime(now)
             .setMaxRolloverClaimPeriods(0)
             .setExpireDays(10)
             .addQualifyingActions(QualifyingAction.newBuilder().setTransfer(transferQA).build())
@@ -89,6 +94,8 @@ class PbClientTest {
             res.txResponse.code == 0,
             "Did not succeed."
         )
+
+        Thread.sleep(futureSeconds * 1000L)
 
         val rewardProgramCreatedEvent = res.txResponse.eventsList.find { it.type == "reward_program_created" }
         val programId = rewardProgramCreatedEvent?.attributesList?.find{
@@ -130,7 +137,6 @@ class PbClientTest {
             .setRewardId(programId)
             .setClaimPeriodId(1L)
             .build())
-
         println(claimPeriodRewardDistributionByIDResponse)
         assertEquals(
             claimPeriodRewardDistributionByIDResponse.claimPeriodRewardDistribution.totalShares,
@@ -141,7 +147,7 @@ class PbClientTest {
         println(claimPeriodRewardDistributions)
     }
 
-    fun getAllVotingKeys(): MutableMap<String, WalletSigner> {
+    fun getAllNodeKeys(): MutableMap<String, WalletSigner> {
         val mapOfSigners = mutableMapOf<String, WalletSigner>()
         for (i in 0 until 4) {
             val jsonString: String = File("/Users/carltonhanna/code/provenance/build/node$i/key_seed.json").readText(Charsets.UTF_8)
@@ -151,21 +157,5 @@ class PbClientTest {
             mapOfSigners.put("node$i", walletSigner)
         }
         return mapOfSigners
-    }
-
-    // propose governance and vote
-    fun createGovProposalAndVote(walletSigners: Map<String, WalletSigner>, msgType: String) {
-        assertTrue { pbClient.addMsgFeeProposal(walletSigners["node0"]!!, msgType).txResponse.code == 0 }
-
-        // let the block be committed
-        Thread.sleep(10000)
-
-        // vote on proposal
-        val govProp = pbClient.getAllProposalsAndFilter()!!
-        assertTrue { pbClient.voteOnProposal(walletSigners["node0"]!!, govProp.proposalId).txResponse.code == 0 }
-        assertTrue { pbClient.voteOnProposal(walletSigners["node1"]!!, govProp.proposalId).txResponse.code == 0 }
-        assertTrue { pbClient.voteOnProposal(walletSigners["node2"]!!, govProp.proposalId).txResponse.code == 0 }
-        assertTrue { pbClient.voteOnProposal(walletSigners["node3"]!!, govProp.proposalId).txResponse.code == 0 }
-        Thread.sleep(10000)
     }
 }
