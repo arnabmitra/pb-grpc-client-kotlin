@@ -8,7 +8,6 @@ import cosmos.base.v1beta1.CoinOuterClass
 import cosmos.tx.v1beta1.ServiceOuterClass
 import cosmos.tx.v1beta1.TxOuterClass
 import io.provenance.client.grpc.BaseReqSigner
-import io.provenance.client.grpc.GasEstimate
 import io.provenance.client.grpc.PbClient
 import io.provenance.client.protobuf.extensions.toAny
 import io.provenance.client.protobuf.extensions.toTxBody
@@ -27,7 +26,7 @@ import kotlin.test.assertTrue
 
 // Tests only work with `make localnet-start` being run on provenance github projects.
 // @Ignore
-class PbClientLocalnetRewardTest {
+class PbClientRewardTest {
 
     val pbClient = PbClient(
         chainId = "chain-local",
@@ -150,12 +149,23 @@ class PbClientLocalnetRewardTest {
     fun getAllNodeKeys(): MutableMap<String, WalletSigner> {
         val mapOfSigners = mutableMapOf<String, WalletSigner>()
         for (i in 0 until 4) {
-            val jsonString: String = File("/Users/carltonhanna/code/provenance/build/node$i/key_seed.json").readText(Charsets.UTF_8)
+            val jsonString: String = File("../provenance/build/node$i/key_seed.json").readText(Charsets.UTF_8)
             val map = Gson().fromJson(jsonString, mutableMapOf<String, String>().javaClass)
             val walletSigner = fromMnemonic(NetworkType.COSMOS_TESTNET, map["secret"]!!)
             println(walletSigner.address())
             mapOfSigners.put("node$i", walletSigner)
         }
+        return mapOfSigners
+    }
+
+    // TODO figure out how to get run net keys
+    fun getRunKeys(): MutableMap<String, WalletSigner> {
+        val mapOfSigners = mutableMapOf<String, WalletSigner>()
+            val jsonString: String = File("../provenance/build/run/provenanced/config/node_key.json").readText(Charsets.UTF_8)
+            val map = Gson().fromJson(jsonString, mutableMapOf<String, String>().javaClass)
+            val walletSigner = fromMnemonic(NetworkType.COSMOS_TESTNET, map["secret"]!!)
+            println(walletSigner.address())
+            mapOfSigners.put("node1", walletSigner)
         return mapOfSigners
     }
 }
