@@ -1,11 +1,9 @@
 package io.provenance.client
 
 import com.google.gson.Gson
-import com.google.protobuf.Timestamp
 import cosmos.auth.v1beta1.QueryOuterClass
 import cosmos.bank.v1beta1.Tx
 import cosmos.base.v1beta1.CoinOuterClass
-import cosmos.tx.v1beta1.ServiceOuterClass
 import cosmos.tx.v1beta1.TxOuterClass
 import io.provenance.client.grpc.BaseReqSigner
 import io.provenance.client.grpc.GasEstimate
@@ -15,8 +13,8 @@ import io.provenance.client.protobuf.extensions.toTxBody
 import io.provenance.client.wallet.NetworkType
 import io.provenance.client.wallet.WalletSigner
 import io.provenance.client.wallet.fromMnemonic
-import io.provenance.reward.v1.*
 import org.junit.Before
+import org.junit.Ignore
 import java.io.File
 import java.net.URI
 import kotlin.test.Test
@@ -25,7 +23,7 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 // Tests only work with `make localnet-start` being run on provenance github projects.
-// @Ignore
+@Ignore
 class PbClientTest {
 
     val pbClient = PbClient(
@@ -41,6 +39,15 @@ class PbClientTest {
     @Before
     fun before() {
         mapOfNodeSigners = getAllVotingKeys()
+        val listOfMsgFees = pbClient.getAllMsgFees()?.filter { it.msgTypeUrl == "/cosmos.bank.v1beta1.MsgSend" || it.msgTypeUrl == "/provenance.marker.v1.MsgAddMarkerRequest" }
+        if (listOfMsgFees?.size!! != 2) {
+            if (listOfMsgFees.filter { it.msgTypeUrl == "/provenance.marker.v1.MsgAddMarkerRequest" }.isEmpty()) {
+                createGovProposalAndVote(walletSigners = mapOfNodeSigners, "/provenance.marker.v1.MsgAddMarkerRequest")
+            }
+            if (listOfMsgFees.filter { it.msgTypeUrl == "/cosmos.bank.v1beta1.MsgSend" }.isEmpty()) {
+                createGovProposalAndVote(walletSigners = mapOfNodeSigners, "/cosmos.bank.v1beta1.MsgSend")
+            }
+        }
     }
 
     @Test
@@ -56,95 +63,130 @@ class PbClientTest {
         }
     }
 
+    /**
+     * Example of how to submit a transaction to chain using the new estimate method for Msg fees.
+     */
     @Test
-    fun testAddRewardProgram() {
-        val wallet = mapOfNodeSigners["node0"]!!
+    fun testClientTxn() {
         val walletSignerToWallet = fromMnemonic(NetworkType.TESTNET, mnemonic)
+        val wallet = mapOfNodeSigners["node0"]!!
 
-        val transferQA = ActionTransfer
-            .newBuilder()
-            .setMaximumActions(10)
-            .setMinimumActions(1)
-            .setMinimumDelegationAmount(CoinOuterClass.Coin.newBuilder().setAmount("0").setDenom("nhash").build())
-            .build()
-        val txn: TxOuterClass.TxBody = MsgCreateRewardProgramRequest
-            .newBuilder()
-            .setTitle("title")
-            .setDescription("description")
-            .setDistributeFromAddress(wallet.address())
-            .setTotalRewardPool(CoinOuterClass.Coin.newBuilder().setAmount("1000000000000").setDenom("nhash").build())
-            .setMaxRewardPerClaimAddress(CoinOuterClass.Coin.newBuilder().setAmount("1000000").setDenom("nhash").build())
-            .setClaimPeriods(10)
-            .setProgramStartTime(Timestamp.newBuilder().setSeconds(Timestamp.getDefaultInstance().seconds + 30))
-            .setMaxRolloverClaimPeriods(0)
-            .setExpireDays(10)
-            .addQualifyingActions(QualifyingAction.newBuilder().setTransfer(transferQA).build())
-            .setClaimPeriodDays(1)
+        val balanceHashOriginal = pbClient.getAcountBalance(wallet.address(), "nhash")
+        val balanceGweiOriginal = pbClient.getAcountBalance(wallet.address(), "gwei")
+
+        // transfer 10000nhash
+        val amount = "10000"
+        val txn: TxOuterClass.TxBody = Tx.MsgSend.newBuilder()
+            .setFromAddress(wallet.address())
+            .setToAddress(walletSignerToWallet.address())
+            .addAmount(CoinOuterClass.Coin.newBuilder().setDenom("nhash").setAmount(amount))
             .build()
             .toAny()
-            .toTxBody()
-        val res = pbClient.estimateAndBroadcastTx(txn, listOf(BaseReqSigner(wallet)), gasAdjustment = 1.5f, mode = ServiceOuterClass.BroadcastMode.BROADCAST_MODE_BLOCK
+            .toTxBody() // todo create your own txn
+
+        val baseRequest = pbClient.baseRequest(
+            txBody = txn,
+            signers = listOf(BaseReqSigner(wallet)),
+            1.5f
         )
+        val estimate: GasEstimate = pbClient.estimateTx(baseRequest)
+
+        println("estimate is $estimate")
+        val estimatedHash = estimate.feesCalculated.firstOrNull { it.denom == "nhash" }
+        assertNotNull(estimatedHash, "estimated hash cannot be null")
+        val estimatedGwei = estimate.feesCalculated.firstOrNull { it.denom == "gwei" }
+        assertNotNull(estimatedGwei, "estimated gwei cannot be null")
+
+        val res = pbClient.estimateAndBroadcastTx(txn, listOf(BaseReqSigner(wallet)), gasAdjustment = 1.5f)
         assertTrue(
             res.txResponse.code == 0,
             "Did not succeed."
         )
 
-        val rewardProgramCreatedEvent = res.txResponse.eventsList.find { it.type == "reward_program_created" }
-        val programId = rewardProgramCreatedEvent?.attributesList?.find{
-            it.key.toString("UTF-8") == "reward_program_id"
-        }?.value?.toString("UTF-8")?.toLong()
-        assertNotNull (
-            programId,
-            "could not find reward program id in events"
-        )
+        // let the block commit
+        Thread.sleep(10000)
 
-        val qRes = pbClient.rewardCleint.rewardProgramByID(RewardProgramByIDRequest.newBuilder().setId(programId!!).build())
-        assertEquals (
-            qRes.rewardProgram.id,
-            programId,
-            "did not find reward program"
-        )
+        val balanceHash = pbClient.getAcountBalance(wallet.address(), "nhash")
+        val balanceGwei = pbClient.getAcountBalance(wallet.address(), "gwei")
 
-        val send1 = Tx.MsgSend.newBuilder()
+        val gweiConsumed = balanceGweiOriginal.amount.toBigDecimal().subtract(balanceGwei.amount.toBigDecimal())
+        val hashConsumed = balanceHashOriginal.amount.toBigDecimal().subtract(balanceHash.amount.toBigDecimal()).subtract(amount.toBigDecimal())
+        assertEquals(estimatedHash.amount.toString(), hashConsumed.toString(), "estimate should match actual")
+        assertEquals(estimatedGwei.amount.toString(), gweiConsumed.toString(), "estimate should match actual")
+    }
+
+    @Test
+    fun testClientMultipleTxn() {
+        // sample mnemonic
+        val walletSignerToWallet = fromMnemonic(NetworkType.TESTNET, mnemonic)
+        val wallet = mapOfNodeSigners["node0"]!!
+
+        val balanceHashOriginal = pbClient.getAcountBalance(wallet.address(), "nhash")
+        val balanceGweiOriginal = pbClient.getAcountBalance(wallet.address(), "gwei")
+
+        // transfer 10000nhash
+        val amount = "10000"
+        val txn = Tx.MsgSend.newBuilder()
             .setFromAddress(wallet.address())
             .setToAddress(walletSignerToWallet.address())
-            .addAmount(CoinOuterClass.Coin.newBuilder().setDenom("nhash").setAmount("1"))
+            .addAmount(CoinOuterClass.Coin.newBuilder().setDenom("nhash").setAmount(amount))
             .build()
             .toAny()
 
-        val send2 = Tx.MsgSend.newBuilder()
+        val txn2 = Tx.MsgSend.newBuilder()
             .setFromAddress(wallet.address())
             .setToAddress(walletSignerToWallet.address())
-            .addAmount(CoinOuterClass.Coin.newBuilder().setDenom("nhash").setAmount("1"))
+            .addAmount(CoinOuterClass.Coin.newBuilder().setDenom("nhash").setAmount(amount))
             .build()
             .toAny()
-        val sendRes = pbClient.estimateAndBroadcastTx(listOf(send1, send2).toTxBody(), listOf(BaseReqSigner(wallet)), gasAdjustment = 2f, mode = ServiceOuterClass.BroadcastMode.BROADCAST_MODE_BLOCK)
+
+        val baseRequest = pbClient.baseRequest(
+            txBody = listOf(txn, txn2).toTxBody(),
+            signers = listOf(BaseReqSigner(wallet)),
+            1.5f
+        )
+        val estimate: GasEstimate = pbClient.estimateTx(baseRequest)
+
+        println("estimate is $estimate")
+        val estimatedHash = estimate.feesCalculated.firstOrNull { it.denom == "nhash" }
+        assertNotNull(estimatedHash, "estimated hash cannot be null")
+        val estimatedGwei = estimate.feesCalculated.firstOrNull { it.denom == "gwei" }
+        assertNotNull(estimatedGwei, "estimated gwei cannot be null")
+
+        val res = pbClient.estimateAndBroadcastTx(listOf(txn, txn2).toTxBody(), listOf(BaseReqSigner(wallet)), gasAdjustment = 1.5f)
         assertTrue(
-            sendRes.txResponse.code == 0,
+            res.txResponse.code == 0,
             "Did not succeed."
         )
 
-        val claimPeriodRewardDistributionByIDResponse = pbClient.rewardCleint.claimPeriodRewardDistributionsByID(ClaimPeriodRewardDistributionByIDRequest
-            .newBuilder()
-            .setRewardId(programId)
-            .setClaimPeriodId(1L)
-            .build())
+        // let the block commit
+        Thread.sleep(10000)
 
-        println(claimPeriodRewardDistributionByIDResponse)
-        assertEquals(
-            claimPeriodRewardDistributionByIDResponse.claimPeriodRewardDistribution.totalShares,
-            2,
-            "Account should have 2 shares for reward program."
+        val balanceHash = pbClient.getAcountBalance(wallet.address(), "nhash")
+        val balanceGwei = pbClient.getAcountBalance(wallet.address(), "gwei")
+
+        val gweiConsumed = balanceGweiOriginal.amount.toBigDecimal().subtract(balanceGwei.amount.toBigDecimal())
+        val hashConsumed = balanceHashOriginal.amount.toBigDecimal().subtract(balanceHash.amount.toBigDecimal()).subtract(amount.toBigDecimal()).subtract(amount.toBigDecimal())
+        assertEquals(estimatedHash.amount.toString(), hashConsumed.toString(), "estimate should match actual")
+        assertEquals(estimatedGwei.amount.toString(), gweiConsumed.toString(), "estimate should match actual")
+    }
+
+    @Test
+    fun testCreateSmartContract() {
+        val wallet = mapOfNodeSigners["node0"]!!
+
+        val result = pbClient.storeWasm(wallet)
+        assertTrue(
+            result.txResponse.code == 0,
+            "Did not succeed."
         )
-        val claimPeriodRewardDistributions = pbClient.rewardCleint.claimPeriodRewardDistributions(ClaimPeriodRewardDistributionRequest.getDefaultInstance())
-        println(claimPeriodRewardDistributions)
+        assertNotNull(result.txResponse.logsList.flatMap { it.eventsList }.filter { it.type == "store_code" }.get(0).attributesList.filter { it.key == "code_id" }.first().value)
     }
 
     fun getAllVotingKeys(): MutableMap<String, WalletSigner> {
         val mapOfSigners = mutableMapOf<String, WalletSigner>()
         for (i in 0 until 4) {
-            val jsonString: String = File("/Users/carltonhanna/code/provenance/build/node$i/key_seed.json").readText(Charsets.UTF_8)
+            val jsonString: String = File("../../provenance/build/node$i/key_seed.json").readText(Charsets.UTF_8)
             val map = Gson().fromJson(jsonString, mutableMapOf<String, String>().javaClass)
             val walletSigner = fromMnemonic(NetworkType.COSMOS_TESTNET, map["secret"]!!)
             println(walletSigner.address())
