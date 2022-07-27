@@ -15,14 +15,12 @@ import io.provenance.client.wallet.NetworkType
 import io.provenance.client.wallet.WalletSigner
 import io.provenance.client.wallet.fromMnemonic
 import io.provenance.reward.v1.*
+import io.provenance.reward.v1.RewardAccountState.ClaimStatus
 import org.junit.Before
 import java.io.File
 import java.net.URI
 import java.time.Instant
-import kotlin.test.Test
-import kotlin.test.assertEquals
-import kotlin.test.assertNotNull
-import kotlin.test.assertTrue
+import kotlin.test.*
 
 // Tests only work with `make localnet-start` being run on provenance github projects.
 // @Ignore
@@ -60,7 +58,7 @@ class PbClientRewardTest {
     fun testAddRewardProgramWithTransferDelegation() {
         val wallet = mapOfNodeSigners["node0"]!!
         val walletSignerToWallet = fromMnemonic(NetworkType.TESTNET, mnemonic)
-        val futureSeconds = 20
+        val futureSeconds = 20L
         val instant = Instant.now()
         val now = Timestamp.newBuilder().setSeconds(instant.getEpochSecond() + futureSeconds)
             .setNanos(instant.getNano()).build();
@@ -78,7 +76,7 @@ class PbClientRewardTest {
             .setDistributeFromAddress(wallet.address())
             .setTotalRewardPool(CoinOuterClass.Coin.newBuilder().setAmount("1000000000000").setDenom("nhash").build())
             .setMaxRewardPerClaimAddress(CoinOuterClass.Coin.newBuilder().setAmount("1000000").setDenom("nhash").build())
-            .setClaimPeriods(10)
+            .setClaimPeriods(1)
             .setProgramStartTime(now)
             .setMaxRolloverClaimPeriods(0)
             .setExpireDays(10)
@@ -87,14 +85,12 @@ class PbClientRewardTest {
             .build()
             .toAny()
             .toTxBody()
-        val res = pbClient.estimateAndBroadcastTx(txn, listOf(BaseReqSigner(wallet)), gasAdjustment = 1.5f, mode = ServiceOuterClass.BroadcastMode.BROADCAST_MODE_BLOCK
+        var res = pbClient.estimateAndBroadcastTx(txn, listOf(BaseReqSigner(wallet)), gasAdjustment = 1.5f, mode = ServiceOuterClass.BroadcastMode.BROADCAST_MODE_BLOCK
         )
         assertTrue(
             res.txResponse.code == 0,
             "Did not succeed."
         )
-
-        Thread.sleep(futureSeconds * 1000L)
 
         val rewardProgramCreatedEvent = res.txResponse.eventsList.find { it.type == "reward_program_created" }
         val programId = rewardProgramCreatedEvent?.attributesList?.find{
@@ -105,13 +101,37 @@ class PbClientRewardTest {
             "could not find reward program id in events"
         )
 
-        val qRes = pbClient.rewardCleint.rewardProgramByID(RewardProgramByIDRequest.newBuilder().setId(programId!!).build())
-        assertEquals (
-            qRes.rewardProgram.id,
-            programId,
+        // test finding new program by pending
+        val rewardProgramsResponse = pbClient.rewardCleint.rewardPrograms(QueryRewardProgramsRequest
+            .newBuilder()
+            .setQueryType(QueryRewardProgramsRequest.QueryType.PENDING)
+            .build()
+        )
+
+        assertTrue (
+            !rewardProgramsResponse.rewardProgramsList.filter { rp -> rp.id == programId }.isEmpty(),
             "did not find reward program"
         )
 
+        Thread.sleep(futureSeconds * 1000)
+
+        // test find program by id...should have changed to started after sleep
+        var rewardProgramByIdResponse = getRewardProgramById(programId)
+        assertEquals (
+            programId,
+            rewardProgramByIdResponse.rewardProgram.id,
+            "did not find reward program"
+        )
+        if (RewardProgram.State.STARTED == rewardProgramByIdResponse.rewardProgram.state) {
+            println("${rewardProgramByIdResponse.rewardProgram.id} has started.")
+        }
+        assertEquals(
+            RewardProgram.State.STARTED,
+            rewardProgramByIdResponse.rewardProgram.state,
+
+            )
+
+        // send two transactions to activate the qualifying action
         val send1 = Tx.MsgSend.newBuilder()
             .setFromAddress(wallet.address())
             .setToAddress(walletSignerToWallet.address())
@@ -125,13 +145,14 @@ class PbClientRewardTest {
             .addAmount(CoinOuterClass.Coin.newBuilder().setDenom("nhash").setAmount("1"))
             .build()
             .toAny()
-        val sendRes = pbClient.estimateAndBroadcastTx(listOf(send1, send2).toTxBody(), listOf(BaseReqSigner(wallet)), gasAdjustment = 2f, mode = ServiceOuterClass.BroadcastMode.BROADCAST_MODE_BLOCK)
+        res = pbClient.estimateAndBroadcastTx(listOf(send1, send2).toTxBody(), listOf(BaseReqSigner(wallet)), gasAdjustment = 2f, mode = ServiceOuterClass.BroadcastMode.BROADCAST_MODE_BLOCK)
         assertTrue(
-            sendRes.txResponse.code == 0,
+            res.txResponse.code == 0,
             "Did not succeed."
         )
 
-        val claimPeriodRewardDistributionByIDResponse = pbClient.rewardCleint.claimPeriodRewardDistributionsByID(ClaimPeriodRewardDistributionByIDRequest
+        // test getting the distribution for program and claim period
+        val claimPeriodRewardDistributionByIDResponse = pbClient.rewardCleint.claimPeriodRewardDistributionsByID(QueryClaimPeriodRewardDistributionByIDRequest
             .newBuilder()
             .setRewardId(programId)
             .setClaimPeriodId(1L)
@@ -142,8 +163,49 @@ class PbClientRewardTest {
             2,
             "Account should have 2 shares for reward program."
         )
-        val claimPeriodRewardDistributions = pbClient.rewardCleint.claimPeriodRewardDistributions(ClaimPeriodRewardDistributionRequest.getDefaultInstance())
-        println(claimPeriodRewardDistributions)
+
+        println("Add Break Point here and change computers date...")
+        Thread.sleep(20000) // sleep to assure it ends program
+
+        rewardProgramByIdResponse = getRewardProgramById(programId)
+        println("reward program after time change ${rewardProgramByIdResponse}")
+        var rewardResponse = pbClient.rewardCleint.queryRewardDistributionsByAddress(QueryRewardsByAddressRequest.newBuilder()
+            .setAddress(wallet.address())
+            .build())
+        var accountState = rewardResponse.rewardAccountStateList.filter { ras -> ras.rewardProgramId == programId }.first()
+        println("Before Claiming ${accountState}")
+        assertEquals(
+            ClaimStatus.CLAIMABLE,
+            accountState.claimStatus,
+            "status should be claimable"
+        )
+
+        // test claim reward tx
+        val claimRewardTx = MsgClaimRewardRequest.newBuilder().setRewardProgramId(programId).setRewardAddress(wallet.address()).build().toAny().toTxBody()
+        res = pbClient.estimateAndBroadcastTx(claimRewardTx, listOf(BaseReqSigner(wallet)), gasAdjustment = 1.5f, mode = ServiceOuterClass.BroadcastMode.BROADCAST_MODE_BLOCK
+        )
+        assertTrue(
+            res.txResponse.code == 0,
+            "Did not succeed."
+        )
+
+        // determine if the reward has been claimed
+        rewardResponse = pbClient.rewardCleint.queryRewardDistributionsByAddress(QueryRewardsByAddressRequest.newBuilder()
+            .setAddress(wallet.address())
+            .build())
+        accountState = rewardResponse.rewardAccountStateList.filter { ras -> ras.rewardProgramId == programId }.first()
+        println("Before Claiming ${accountState}")
+        assertEquals(
+            ClaimStatus.CLAIMED,
+            accountState.claimStatus,
+            "status should be claimed"
+        )
+    }
+
+    fun getRewardProgramById(id : Long) : QueryRewardProgramByIDResponse{
+        return pbClient.rewardCleint.rewardProgramByID(QueryRewardProgramByIDRequest.newBuilder()
+            .setId(id)
+            .build())
     }
 
     fun getAllNodeKeys(): MutableMap<String, WalletSigner> {
@@ -161,11 +223,11 @@ class PbClientRewardTest {
     // TODO figure out how to get run net keys
     fun getRunKeys(): MutableMap<String, WalletSigner> {
         val mapOfSigners = mutableMapOf<String, WalletSigner>()
-            val jsonString: String = File("../provenance/build/run/provenanced/config/node_key.json").readText(Charsets.UTF_8)
-            val map = Gson().fromJson(jsonString, mutableMapOf<String, String>().javaClass)
-            val walletSigner = fromMnemonic(NetworkType.COSMOS_TESTNET, map["secret"]!!)
-            println(walletSigner.address())
-            mapOfSigners.put("node1", walletSigner)
+        val jsonString: String = File("../provenance/build/run/provenanced/config/node_key.json").readText(Charsets.UTF_8)
+        val map = Gson().fromJson(jsonString, mutableMapOf<String, String>().javaClass)
+        val walletSigner = fromMnemonic(NetworkType.COSMOS_TESTNET, map["secret"]!!)
+        println(walletSigner.address())
+        mapOfSigners.put("node1", walletSigner)
         return mapOfSigners
     }
 }
