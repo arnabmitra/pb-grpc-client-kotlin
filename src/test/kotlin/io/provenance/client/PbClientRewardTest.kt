@@ -55,12 +55,11 @@ class PbClientRewardTest {
     }
 
     @Test
-    fun testAddRewardProgramWithTransferDelegation() {
+    fun testCreateAndEndProgram() {
         val wallet = mapOfNodeSigners["node0"]!!
-        val walletSignerToWallet = fromMnemonic(NetworkType.TESTNET, mnemonic)
         val futureSeconds = 20L
-        val instant = Instant.now()
-        val now = Timestamp.newBuilder().setSeconds(instant.getEpochSecond() + futureSeconds)
+        var instant = Instant.now()
+        var futureStartTime = Timestamp.newBuilder().setSeconds(instant.getEpochSecond() + futureSeconds)
             .setNanos(instant.getNano()).build();
 
         val transferQA = ActionTransfer
@@ -77,7 +76,7 @@ class PbClientRewardTest {
             .setTotalRewardPool(CoinOuterClass.Coin.newBuilder().setAmount("1000000000000").setDenom("nhash").build())
             .setMaxRewardPerClaimAddress(CoinOuterClass.Coin.newBuilder().setAmount("1000000").setDenom("nhash").build())
             .setClaimPeriods(1)
-            .setProgramStartTime(now)
+            .setProgramStartTime(futureStartTime)
             .setMaxRolloverClaimPeriods(0)
             .setExpireDays(10)
             .addQualifyingActions(QualifyingAction.newBuilder().setTransfer(transferQA).build())
@@ -91,11 +90,133 @@ class PbClientRewardTest {
             res.txResponse.code == 0,
             "Did not succeed."
         )
+        val pendingProgramId = getProgramIdFromEventList(res)!!
+        val msgEndRewardProgramRequest = MsgEndRewardProgramRequest.newBuilder()
+            .setRewardProgramId(pendingProgramId)
+            .setProgramOwnerAddress(wallet.address())
+            .build().toAny().toTxBody()
+        runTxAssertPasses(msgEndRewardProgramRequest, wallet)
 
-        val rewardProgramCreatedEvent = res.txResponse.eventsList.find { it.type == "reward_program_created" }
-        val programId = rewardProgramCreatedEvent?.attributesList?.find{
+        assertFailsWith<io.grpc.StatusRuntimeException> (
+            message = "INTERNAL: unable to query for reward program by ID: reward program not found",
+            block = {
+                getRewardProgramById(pendingProgramId)
+            }
+        )
+
+        instant = Instant.now()
+        futureStartTime = Timestamp.newBuilder().setSeconds(instant.getEpochSecond() + futureSeconds)
+            .setNanos(instant.getNano()).build();
+
+        val txn2: TxOuterClass.TxBody = MsgCreateRewardProgramRequest
+            .newBuilder()
+            .setTitle("title")
+            .setDescription("description")
+            .setDistributeFromAddress(wallet.address())
+            .setTotalRewardPool(CoinOuterClass.Coin.newBuilder().setAmount("1000000000000").setDenom("nhash").build())
+            .setMaxRewardPerClaimAddress(CoinOuterClass.Coin.newBuilder().setAmount("1000000").setDenom("nhash").build())
+            .setClaimPeriods(10)
+            .setProgramStartTime(futureStartTime)
+            .setMaxRolloverClaimPeriods(10)
+            .setExpireDays(10)
+            .addQualifyingActions(QualifyingAction.newBuilder().setTransfer(transferQA).build())
+            .setClaimPeriodDays(1)
+            .build()
+            .toAny()
+            .toTxBody()
+        res = pbClient.estimateAndBroadcastTx(txn2, listOf(BaseReqSigner(wallet)), gasAdjustment = 1.5f, mode = ServiceOuterClass.BroadcastMode.BROADCAST_MODE_BLOCK
+        )
+        assertTrue(
+            res.txResponse.code == 0,
+            "Did not succeed."
+        )
+        val startedProgramId = getProgramIdFromEventList(res)!!
+
+        Thread.sleep(futureSeconds * 1000)
+
+        val msgStartedEndRewardProgramRequest = MsgEndRewardProgramRequest.newBuilder()
+            .setRewardProgramId(startedProgramId)
+            .setProgramOwnerAddress(wallet.address())
+            .build().toAny().toTxBody()
+        runTxAssertPasses(msgStartedEndRewardProgramRequest, wallet)
+        Thread.sleep(10 * 1000)
+        var stopped = getRewardProgramById(startedProgramId)
+        assertEquals(
+            1L,
+            stopped.rewardProgram.claimPeriods,
+            "should have reset to 1"
+        )
+        assertEquals(
+            1L,
+            stopped.rewardProgram.currentClaimPeriod,
+            "should have reset to 1"
+        )
+        assertEquals(
+            0L,
+            stopped.rewardProgram.maxRolloverClaimPeriods,
+            "should have reset to 0"
+        )
+        assertTrue(
+            stopped.rewardProgram.claimPeriodEndTime.equals(stopped.rewardProgram.expectedProgramEndTime),
+            "should have set expected end time to claim period end time"
+        )
+        assertTrue(
+            stopped.rewardProgram.claimPeriodEndTime.equals(stopped.rewardProgram.programEndTimeMax),
+            "should have set actual end time to claim period end time"
+        )
+    }
+
+    fun runTxAssertPasses(txn : TxOuterClass.TxBody, signer: WalletSigner) : ServiceOuterClass.BroadcastTxResponse{
+        var res = pbClient.estimateAndBroadcastTx(txn, listOf(BaseReqSigner(signer)), gasAdjustment = 1.5f, mode = ServiceOuterClass.BroadcastMode.BROADCAST_MODE_BLOCK
+        )
+        assertTrue(
+            res.txResponse.code == 0,
+            "Did not succeed."
+        )
+        return res
+    }
+
+    fun getProgramIdFromEventList(response: ServiceOuterClass.BroadcastTxResponse) : Long?
+    {
+        val rewardProgramCreatedEvent = response.txResponse.eventsList.find { it.type == "reward_program_created" }
+        return rewardProgramCreatedEvent?.attributesList?.find {
             it.key.toString("UTF-8") == "reward_program_id"
         }?.value?.toString("UTF-8")?.toLong()
+    }
+
+    @Test
+    fun testAddRewardProgramWithTransferDelegation() {
+        val wallet = mapOfNodeSigners["node0"]!!
+        val walletSignerToWallet = fromMnemonic(NetworkType.TESTNET, mnemonic)
+        val futureSeconds = 20L
+        val instant = Instant.now()
+        val futureStartTime = Timestamp.newBuilder().setSeconds(instant.getEpochSecond() + futureSeconds)
+            .setNanos(instant.getNano()).build();
+
+        val transferQA = ActionTransfer
+            .newBuilder()
+            .setMaximumActions(10)
+            .setMinimumActions(1)
+            .setMinimumDelegationAmount(CoinOuterClass.Coin.newBuilder().setAmount("0").setDenom("nhash").build())
+            .build()
+        val txn: TxOuterClass.TxBody = MsgCreateRewardProgramRequest
+            .newBuilder()
+            .setTitle("title")
+            .setDescription("description")
+            .setDistributeFromAddress(wallet.address())
+            .setTotalRewardPool(CoinOuterClass.Coin.newBuilder().setAmount("1000000000000").setDenom("nhash").build())
+            .setMaxRewardPerClaimAddress(CoinOuterClass.Coin.newBuilder().setAmount("1000000").setDenom("nhash").build())
+            .setClaimPeriods(1)
+            .setProgramStartTime(futureStartTime)
+            .setMaxRolloverClaimPeriods(0)
+            .setExpireDays(10)
+            .addQualifyingActions(QualifyingAction.newBuilder().setTransfer(transferQA).build())
+            .setClaimPeriodDays(1)
+            .build()
+            .toAny()
+            .toTxBody()
+        var res = runTxAssertPasses(txn, wallet)
+        val programId = getProgramIdFromEventList(res)!!
         assertNotNull (
             programId,
             "could not find reward program id in events"
@@ -145,11 +266,7 @@ class PbClientRewardTest {
             .addAmount(CoinOuterClass.Coin.newBuilder().setDenom("nhash").setAmount("1"))
             .build()
             .toAny()
-        res = pbClient.estimateAndBroadcastTx(listOf(send1, send2).toTxBody(), listOf(BaseReqSigner(wallet)), gasAdjustment = 2f, mode = ServiceOuterClass.BroadcastMode.BROADCAST_MODE_BLOCK)
-        assertTrue(
-            res.txResponse.code == 0,
-            "Did not succeed."
-        )
+        runTxAssertPasses(listOf(send1, send2).toTxBody(), wallet)
 
         // test getting the distribution for program and claim period
         val claimPeriodRewardDistributionByIDResponse = pbClient.rewardCleint.claimPeriodRewardDistributionsByID(QueryClaimPeriodRewardDistributionByIDRequest
@@ -182,12 +299,7 @@ class PbClientRewardTest {
 
         // test claim reward tx
         val claimRewardTx = MsgClaimRewardRequest.newBuilder().setRewardProgramId(programId).setRewardAddress(wallet.address()).build().toAny().toTxBody()
-        res = pbClient.estimateAndBroadcastTx(claimRewardTx, listOf(BaseReqSigner(wallet)), gasAdjustment = 1.5f, mode = ServiceOuterClass.BroadcastMode.BROADCAST_MODE_BLOCK
-        )
-        assertTrue(
-            res.txResponse.code == 0,
-            "Did not succeed."
-        )
+        runTxAssertPasses(claimRewardTx, wallet)
 
         // determine if the reward has been claimed
         rewardResponse = pbClient.rewardCleint.queryRewardDistributionsByAddress(QueryRewardsByAddressRequest.newBuilder()
