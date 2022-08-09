@@ -225,7 +225,7 @@ class PbClientRewardTest {
         // test finding new program by pending
         val rewardProgramsResponse = pbClient.rewardCleint.rewardPrograms(QueryRewardProgramsRequest
             .newBuilder()
-            .setQueryType(QueryRewardProgramsRequest.QueryType.PENDING)
+            .setQueryType(QueryRewardProgramsRequest.QueryType.QUERY_TYPE_PENDING)
             .build()
         )
 
@@ -243,11 +243,11 @@ class PbClientRewardTest {
             rewardProgramByIdResponse.rewardProgram.id,
             "did not find reward program"
         )
-        if (RewardProgram.State.STARTED == rewardProgramByIdResponse.rewardProgram.state) {
+        if (RewardProgram.State.STATE_STARTED == rewardProgramByIdResponse.rewardProgram.state) {
             println("${rewardProgramByIdResponse.rewardProgram.id} has started.")
         }
         assertEquals(
-            RewardProgram.State.STARTED,
+            RewardProgram.State.STATE_STARTED,
             rewardProgramByIdResponse.rewardProgram.state,
 
             )
@@ -269,7 +269,7 @@ class PbClientRewardTest {
         runTxAssertPasses(listOf(send1, send2).toTxBody(), wallet)
 
         // test getting the distribution for program and claim period
-        val claimPeriodRewardDistributionByIDResponse = pbClient.rewardCleint.claimPeriodRewardDistributionsByID(QueryClaimPeriodRewardDistributionByIDRequest
+        val claimPeriodRewardDistributionByIDResponse = pbClient.rewardCleint.claimPeriodRewardDistributionsByID(QueryClaimPeriodRewardDistributionsByIDRequest
             .newBuilder()
             .setRewardId(programId)
             .setClaimPeriodId(1L)
@@ -286,29 +286,30 @@ class PbClientRewardTest {
 
         rewardProgramByIdResponse = getRewardProgramById(programId)
         println("reward program after time change ${rewardProgramByIdResponse}")
-        var rewardResponse = pbClient.rewardCleint.queryRewardDistributionsByAddress(QueryRewardsByAddressRequest.newBuilder()
+        var rewardResponse = pbClient.rewardCleint.rewardDistributionsByAddress(
+            QueryRewardDistributionsByAddressRequest.newBuilder()
             .setAddress(wallet.address())
             .build())
         var accountState = rewardResponse.rewardAccountStateList.filter { ras -> ras.rewardProgramId == programId }.first()
         println("Before Claiming ${accountState}")
         assertEquals(
-            ClaimStatus.CLAIMABLE,
+            ClaimStatus.CLAIM_STATUS_CLAIMABLE,
             accountState.claimStatus,
             "status should be claimable"
         )
 
         // test claim reward tx
-        val claimRewardTx = MsgClaimRewardRequest.newBuilder().setRewardProgramId(programId).setRewardAddress(wallet.address()).build().toAny().toTxBody()
+        val claimRewardTx = MsgClaimRewardsRequest.newBuilder().setRewardProgramId(programId).setRewardAddress(wallet.address()).build().toAny().toTxBody()
         runTxAssertPasses(claimRewardTx, wallet)
 
         // determine if the reward has been claimed
-        rewardResponse = pbClient.rewardCleint.queryRewardDistributionsByAddress(QueryRewardsByAddressRequest.newBuilder()
+        rewardResponse = pbClient.rewardCleint.rewardDistributionsByAddress(QueryRewardDistributionsByAddressRequest.newBuilder()
             .setAddress(wallet.address())
             .build())
         accountState = rewardResponse.rewardAccountStateList.filter { ras -> ras.rewardProgramId == programId }.first()
         println("Before Claiming ${accountState}")
         assertEquals(
-            ClaimStatus.CLAIMED,
+            ClaimStatus.CLAIM_STATUS_CLAIMED,
             accountState.claimStatus,
             "status should be claimed"
         )
