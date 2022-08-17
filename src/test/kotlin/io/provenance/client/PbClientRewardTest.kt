@@ -315,6 +315,155 @@ class PbClientRewardTest {
         )
     }
 
+    @Test
+    fun testAddRewardProgramWithTransferDelegationMultiplePeriods() {
+        val claimPeriods = 4
+        val wallet = mapOfNodeSigners["node0"]!!
+        val walletSignerToWallet = fromMnemonic(NetworkType.TESTNET, mnemonic)
+        val futureSeconds = 20L
+        val instant = Instant.now()
+        val futureStartTime = Timestamp.newBuilder().setSeconds(instant.getEpochSecond() + futureSeconds)
+            .setNanos(instant.getNano()).build();
+
+        val transferQA = ActionTransfer
+            .newBuilder()
+            .setMaximumActions(10)
+            .setMinimumActions(1)
+            .setMinimumDelegationAmount(CoinOuterClass.Coin.newBuilder().setAmount("0").setDenom("nhash").build())
+            .build()
+        val txn: TxOuterClass.TxBody = MsgCreateRewardProgramRequest
+            .newBuilder()
+            .setTitle("title")
+            .setDescription("description")
+            .setDistributeFromAddress(wallet.address())
+            .setTotalRewardPool(CoinOuterClass.Coin.newBuilder().setAmount("1000000000000").setDenom("nhash").build())
+            .setMaxRewardPerClaimAddress(CoinOuterClass.Coin.newBuilder().setAmount("1000000").setDenom("nhash").build())
+            .setClaimPeriods(4)
+            .setProgramStartTime(futureStartTime)
+            .setMaxRolloverClaimPeriods(0)
+            .setExpireDays(10)
+            .addQualifyingActions(QualifyingAction.newBuilder().setTransfer(transferQA).build())
+            .setClaimPeriodDays(1)
+            .build()
+            .toAny()
+            .toTxBody()
+        var res = runTxAssertPasses(txn, wallet)
+        val programId = getProgramIdFromEventList(res)!!
+        assertNotNull (
+            programId,
+            "could not find reward program id in events"
+        )
+
+        // test finding new program by pending
+        val rewardProgramsResponse = pbClient.rewardCleint.rewardPrograms(QueryRewardProgramsRequest
+            .newBuilder()
+            .setQueryType(QueryRewardProgramsRequest.QueryType.QUERY_TYPE_PENDING)
+            .build()
+        )
+
+        assertTrue (
+            !rewardProgramsResponse.rewardProgramsList.filter { rp -> rp.id == programId }.isEmpty(),
+            "did not find reward program"
+        )
+
+        Thread.sleep(futureSeconds * 1000)
+
+        // test find program by id...should have changed to started after sleep
+        var rewardProgramByIdResponse = getRewardProgramById(programId)
+        assertEquals (
+            programId,
+            rewardProgramByIdResponse.rewardProgram.id,
+            "did not find reward program"
+        )
+        if (RewardProgram.State.STATE_STARTED == rewardProgramByIdResponse.rewardProgram.state) {
+            println("${rewardProgramByIdResponse.rewardProgram.id} has started.")
+        }
+        assertEquals(
+            RewardProgram.State.STATE_STARTED,
+            rewardProgramByIdResponse.rewardProgram.state,
+
+            )
+        assertEquals(
+            1L,
+            rewardProgramByIdResponse.rewardProgram.currentClaimPeriod,
+            )
+
+        for(i in 1..claimPeriods ) {
+            rewardProgramByIdResponse = getRewardProgramById(programId)
+            if (rewardProgramByIdResponse.rewardProgram.currentClaimPeriod !=  i.toLong()){
+                println("claim period should match iteration ${rewardProgramByIdResponse.rewardProgram.currentClaimPeriod} != $i")
+            }
+            println("Current Reward Program State in tx loop $i : current claim period: " +
+                    "${rewardProgramByIdResponse.rewardProgram.currentClaimPeriod} state: ${rewardProgramByIdResponse.rewardProgram.state}"
+            )
+            // send two transactions to activate the qualifying action
+            val send1 = Tx.MsgSend.newBuilder()
+                .setFromAddress(wallet.address())
+                .setToAddress(walletSignerToWallet.address())
+                .addAmount(CoinOuterClass.Coin.newBuilder().setDenom("nhash").setAmount("1"))
+                .build()
+                .toAny()
+
+            val send2 = Tx.MsgSend.newBuilder()
+                .setFromAddress(wallet.address())
+                .setToAddress(walletSignerToWallet.address())
+                .addAmount(CoinOuterClass.Coin.newBuilder().setDenom("nhash").setAmount("1"))
+                .build()
+                .toAny()
+            runTxAssertPasses(listOf(send1, send2).toTxBody(), wallet)
+            println("Add breakpoint here and change date on computer +1 day ")
+            Thread.sleep(20000)
+        }
+
+        val claimPeriodRewards = pbClient.rewardCleint.claimPeriodRewardDistributions(
+            QueryClaimPeriodRewardDistributionsRequest.getDefaultInstance())
+        println(claimPeriodRewards)
+
+        rewardProgramByIdResponse = getRewardProgramById(programId)
+        println("reward program after time change $rewardProgramByIdResponse")
+        var rewardResponse = pbClient.rewardCleint.rewardDistributionsByAddress(
+            QueryRewardDistributionsByAddressRequest.newBuilder()
+                .setAddress(wallet.address())
+                .build())
+        println("Before Claiming $rewardResponse")
+        assertEquals(
+            rewardResponse.rewardAccountStateList.size,
+            claimPeriods,
+            "should be 4 claim period rewards"
+        )
+        rewardResponse.rewardAccountStateList.forEach {x ->
+            assertEquals(
+                ClaimStatus.CLAIM_STATUS_CLAIMABLE,
+                x.claimStatus,
+                "status should be claimable"
+            )
+        }
+
+        val claimRewardTx = MsgClaimAllRewardsRequest.newBuilder().
+        setRewardAddress(wallet.address())
+            .build()
+            .toAny()
+            .toTxBody()
+        runTxAssertPasses(claimRewardTx, wallet)
+
+        // determine if the reward has been claimed
+        rewardResponse = pbClient.rewardCleint.rewardDistributionsByAddress(QueryRewardDistributionsByAddressRequest.newBuilder()
+            .setAddress(wallet.address())
+            .build())
+        assertEquals(
+            rewardResponse.rewardAccountStateList.size,
+            claimPeriods,
+            "should be 4 claim period rewards"
+        )
+        rewardResponse.rewardAccountStateList.forEach {x ->
+            assertEquals(
+                ClaimStatus.CLAIM_STATUS_CLAIMED,
+                x.claimStatus,
+                "status should be claimed"
+            )
+        }
+    }
+
     fun getRewardProgramById(id : Long) : QueryRewardProgramByIDResponse{
         return pbClient.rewardCleint.rewardProgramByID(QueryRewardProgramByIDRequest.newBuilder()
             .setId(id)
